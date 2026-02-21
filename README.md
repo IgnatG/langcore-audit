@@ -27,10 +27,12 @@ pip install -e ".[otel]"
 - **Structured records** — each inference call produces an `AuditRecord` with:
   - Prompt hash (SHA-256)
   - Response hash (SHA-256)
-  - Latency (ms)
+  - Latency (ms) — per-prompt in sync, averaged in async
+  - `batch_total_ms` — total wall-clock time for the entire async batch
   - Token usage (if available)
   - Model ID, timestamp, success/failure, score
   - Batch index and batch size
+  - Optional truncated prompt/response samples (opt-in via `sample_length`)
 - **Thread-safe** — all sinks are safe for concurrent use
 - **Fault-tolerant** — sink errors are logged and swallowed, never affecting inference
 
@@ -89,7 +91,10 @@ Each line in the output file is a JSON object:
   "score": 1.0,
   "token_usage": {"prompt_tokens": 150, "completion_tokens": 45, "total_tokens": 195},
   "batch_index": 0,
-  "batch_size": 1
+  "batch_size": 1,
+  "batch_total_ms": null,
+  "prompt_sample": null,
+  "response_sample": null
 }
 ```
 
@@ -125,13 +130,30 @@ audit_model = AuditLanguageModel(
 )
 ```
 
-### Async Usage
+### Prompt / Response Sampling
+
+By default, prompt and response text is **not** stored in audit records (only
+hashes).  Set `sample_length` to capture truncated samples for debugging:
 
 ```python
-import asyncio
+audit_model = AuditLanguageModel(
+    model_id="audit/gpt-4o",
+    inner=inner_model,
+    sinks=[LoggingSink()],
+    sample_length=200,  # store first 200 chars of prompt & response
+)
+```
 
+### Async Usage
+
+Async batches record both the per-prompt average (`latency_ms`) and the total
+batch wall-clock time (`batch_total_ms`) on every record:
+
+```python
 results = await audit_model.async_infer(["prompt1", "prompt2"])
-# Audit records are emitted for each prompt
+# Each AuditRecord will have:
+#   latency_ms     = total / batch_size  (per-prompt average)
+#   batch_total_ms = total wall-clock time for the full batch
 ```
 
 ## Available Sinks

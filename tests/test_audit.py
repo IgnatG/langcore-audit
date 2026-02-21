@@ -432,6 +432,44 @@ class TestAuditProviderAsync:
         results = await audit.async_infer(["prompt"])
         assert results[0][0].output == "async result"
 
+    @pytest.mark.asyncio
+    async def test_async_batch_total_ms_populated(self) -> None:
+        """batch_total_ms should be set on every async record.
+
+        For a batch of N prompts ``batch_total_ms`` must be >= 0 and
+        should be >= ``latency_ms`` (the per-prompt average) since
+        the total cannot be less than one prompt's share.
+        """
+        stub = _StubProvider()
+        capture = _CaptureSink()
+        audit = AuditLanguageModel(
+            model_id="audit/test",
+            inner=stub,
+            sinks=[capture],
+        )
+        await audit.async_infer(["a", "b", "c"])
+        assert len(capture.records) == 3
+        for rec in capture.records:
+            assert rec.batch_total_ms is not None
+            assert rec.batch_total_ms >= 0.0
+            # Per-prompt average must not exceed the total.
+            assert rec.latency_ms <= rec.batch_total_ms + 1e-9
+
+    @pytest.mark.asyncio
+    async def test_async_single_prompt_total_equals_latency(self) -> None:
+        """For a single-prompt async batch, latency_ms == batch_total_ms."""
+        stub = _StubProvider()
+        capture = _CaptureSink()
+        audit = AuditLanguageModel(
+            model_id="audit/test",
+            inner=stub,
+            sinks=[capture],
+        )
+        await audit.async_infer(["only prompt"])
+        rec = capture.records[0]
+        assert rec.batch_total_ms is not None
+        assert rec.latency_ms == pytest.approx(rec.batch_total_ms, abs=1e-6)
+
 
 # ---------------------------------------------------------------------------
 # Plugin registration test

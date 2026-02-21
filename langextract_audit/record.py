@@ -16,8 +16,8 @@ class AuditRecord:
         model_id: The model identifier used for the inference.
         prompt_hash: SHA-256 hex digest of the prompt text.
         response_hash: SHA-256 hex digest of the response text.
-        latency_ms: Wall-clock time for the inference in
-            milliseconds.
+        latency_ms: Average wall-clock time per prompt in the
+            batch, in milliseconds.
         timestamp: UTC timestamp of the inference call.
         success: Whether the inference completed without error.
         score: The score from the ``ScoredOutput``.
@@ -25,6 +25,9 @@ class AuditRecord:
         token_usage: Optional token usage dict from the response.
         batch_index: Index of the prompt within the batch.
         batch_size: Total number of prompts in the batch.
+        batch_total_ms: Total wall-clock time for the full batch
+            in milliseconds (async only; ``None`` for sync where
+            each prompt is timed individually).
         prompt_sample: Optional truncated prompt text (opt-in).
         response_sample: Optional truncated response text (opt-in).
         extra: Arbitrary additional metadata.
@@ -41,6 +44,7 @@ class AuditRecord:
     token_usage: dict[str, int] | None = None
     batch_index: int = 0
     batch_size: int = 1
+    batch_total_ms: float | None = None
     prompt_sample: str | None = None
     response_sample: str | None = None
     extra: dict[str, Any] | None = None

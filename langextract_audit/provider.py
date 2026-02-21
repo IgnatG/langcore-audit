@@ -124,17 +124,19 @@ class AuditLanguageModel(BaseLanguageModel):
         *,
         success: bool = True,
         error: str | None = None,
+        batch_total_ms: float | None = None,
     ) -> AuditRecord:
         """Build an ``AuditRecord`` from inference inputs and outputs.
 
         Parameters:
             prompt: The raw prompt text.
             outputs: The scored outputs from the inference call.
-            latency_ms: Elapsed time in milliseconds.
+            latency_ms: Per-prompt latency (or batch avg) in ms.
             batch_index: Index of this prompt in the batch.
             batch_size: Total prompts in the batch.
             success: Whether the inference completed without error.
             error: Error message if the inference call failed.
+            batch_total_ms: Total batch wall-clock time (async only).
 
         Returns:
             A populated ``AuditRecord``.
@@ -173,6 +175,9 @@ class AuditLanguageModel(BaseLanguageModel):
             token_usage=token_usage,
             batch_index=batch_index,
             batch_size=batch_size,
+            batch_total_ms=(
+                round(batch_total_ms, 2) if batch_total_ms is not None else None
+            ),
             prompt_sample=prompt_sample,
             response_sample=response_sample,
         )
@@ -286,6 +291,7 @@ class AuditLanguageModel(BaseLanguageModel):
                     batch_index=idx,
                     batch_size=batch_size,
                     success=True,
+                    batch_total_ms=total_latency_ms,
                 )
                 self._emit(record)
 

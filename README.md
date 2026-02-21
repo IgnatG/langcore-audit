@@ -1,0 +1,169 @@
+# LangExtract Audit Provider
+
+A provider plugin for [LangExtract](https://github.com/google/langextract) that wraps any `BaseLanguageModel` with structured audit logging. Pure decorator pattern — zero impact on inference results.
+
+> **Note**: This is a third-party provider plugin for LangExtract. For the main LangExtract library, visit [google/langextract](https://github.com/google/langextract).
+
+## Installation
+
+Install from source:
+
+```bash
+git clone <repo-url>
+cd langextract-audit
+pip install -e .
+```
+
+For OpenTelemetry support:
+
+```bash
+pip install -e ".[otel]"
+```
+
+## Features
+
+- **Pure decorator** — wraps any existing provider without modifying behaviour
+- **Pluggable sinks** — log to files, Python logging, or OpenTelemetry spans
+- **Structured records** — each inference call produces an `AuditRecord` with:
+  - Prompt hash (SHA-256)
+  - Response hash (SHA-256)
+  - Latency (ms)
+  - Token usage (if available)
+  - Model ID, timestamp, success/failure, score
+  - Batch index and batch size
+- **Thread-safe** — all sinks are safe for concurrent use
+- **Fault-tolerant** — sink errors are logged and swallowed, never affecting inference
+
+## Usage
+
+### Basic Usage with Logging Sink
+
+```python
+import langextract as lx
+from langextract_audit import AuditLanguageModel, LoggingSink
+
+# Create the inner provider (any BaseLanguageModel)
+inner_config = lx.factory.ModelConfig(
+    model_id="litellm/azure/gpt-4o",
+    provider="LiteLLMLanguageModel",
+)
+inner_model = lx.factory.create_model(inner_config)
+
+# Wrap with audit logging
+audit_model = AuditLanguageModel(
+    model_id="audit/gpt-4o",
+    inner=inner_model,
+    sinks=[LoggingSink(logger_name="my_app.audit")],
+)
+
+# Use as normal — audit records are emitted automatically
+result = lx.extract(
+    text_or_documents="Contract text...",
+    model=audit_model,
+    prompt_description="Extract parties, dates, and obligations.",
+)
+```
+
+### JSON File Audit Trail
+
+```python
+from langextract_audit import AuditLanguageModel, JsonFileSink
+
+audit_model = AuditLanguageModel(
+    model_id="audit/gpt-4o",
+    inner=inner_model,
+    sinks=[JsonFileSink("./audit_logs/extractions.jsonl")],
+)
+```
+
+Each line in the output file is a JSON object:
+
+```json
+{
+  "model_id": "audit/gpt-4o",
+  "prompt_hash": "a3f2...",
+  "response_hash": "b7c1...",
+  "latency_ms": 1234.56,
+  "timestamp": "2026-02-21T10:30:00+00:00",
+  "success": true,
+  "score": 1.0,
+  "token_usage": {"prompt_tokens": 150, "completion_tokens": 45, "total_tokens": 195},
+  "batch_index": 0,
+  "batch_size": 1
+}
+```
+
+### OpenTelemetry Integration
+
+```python
+from langextract_audit import AuditLanguageModel
+from langextract_audit.sinks import OtelSpanSink
+
+audit_model = AuditLanguageModel(
+    model_id="audit/gpt-4o",
+    inner=inner_model,
+    sinks=[OtelSpanSink(tracer_name="my_service.llm")],
+)
+```
+
+### Multiple Sinks
+
+```python
+from langextract_audit import (
+    AuditLanguageModel,
+    JsonFileSink,
+    LoggingSink,
+)
+
+audit_model = AuditLanguageModel(
+    model_id="audit/gpt-4o",
+    inner=inner_model,
+    sinks=[
+        LoggingSink(),                              # Console/log output
+        JsonFileSink("./audit/extractions.jsonl"),  # Persistent file
+    ],
+)
+```
+
+### Async Usage
+
+```python
+import asyncio
+
+results = await audit_model.async_infer(["prompt1", "prompt2"])
+# Audit records are emitted for each prompt
+```
+
+## Available Sinks
+
+| Sink | Description |
+|------|-------------|
+| `LoggingSink` | Emits records via Python `logging` as JSON strings |
+| `JsonFileSink` | Appends newline-delimited JSON to a file |
+| `OtelSpanSink` | Creates OpenTelemetry spans with audit attributes |
+
+### Custom Sinks
+
+Implement the `AuditSink` interface:
+
+```python
+from langextract_audit.sinks import AuditSink
+from langextract_audit.record import AuditRecord
+
+class MyCustomSink(AuditSink):
+    def emit(self, record: AuditRecord) -> None:
+        # Send to your preferred destination
+        data = record.to_dict()
+        my_api.send_audit(data)
+```
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+## License
+
+Apache 2.0

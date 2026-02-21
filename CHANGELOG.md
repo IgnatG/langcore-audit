@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.1.3 (2026-02-21)
+
+### Bug Fixes
+
+- Update langextract dependency to langextract-core and adjust related configurations
+  ([`66ae36e`](https://github.com/IgnatG/langextract-audit/commit/66ae36e00b97a037624a7df6b78b6273dd462cb0))
+
+
 ## v1.1.2 (2026-02-21)
 
 ### Bug Fixes

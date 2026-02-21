@@ -19,11 +19,14 @@ class AuditRecord:
         latency_ms: Wall-clock time for the inference in
             milliseconds.
         timestamp: UTC timestamp of the inference call.
-        success: Whether the inference succeeded (score > 0).
+        success: Whether the inference completed without error.
         score: The score from the ``ScoredOutput``.
+        error: Error message if the inference call failed.
         token_usage: Optional token usage dict from the response.
         batch_index: Index of the prompt within the batch.
         batch_size: Total number of prompts in the batch.
+        prompt_sample: Optional truncated prompt text (opt-in).
+        response_sample: Optional truncated response text (opt-in).
         extra: Arbitrary additional metadata.
     """
 
@@ -34,9 +37,12 @@ class AuditRecord:
     timestamp: str
     success: bool
     score: float | None = None
+    error: str | None = None
     token_usage: dict[str, int] | None = None
     batch_index: int = 0
     batch_size: int = 1
+    prompt_sample: str | None = None
+    response_sample: str | None = None
     extra: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:

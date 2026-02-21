@@ -233,8 +233,9 @@ class TestAuditProviderSync:
         expected_hash = AuditRecord.hash_text("hello world")
         assert capture.records[0].prompt_hash == expected_hash
 
-    def test_record_marks_failure(self) -> None:
-        stub = _StubProvider(responses=[[ScoredOutput(score=0.0, output="fail")]])
+    def test_record_marks_success_on_zero_score(self) -> None:
+        """A score of 0 is still a successful inference (no error)."""
+        stub = _StubProvider(responses=[[ScoredOutput(score=0.0, output="result")]])
         capture = _CaptureSink()
         audit = AuditLanguageModel(
             model_id="audit/test",
@@ -242,7 +243,8 @@ class TestAuditProviderSync:
             sinks=[capture],
         )
         list(audit.infer(["prompt"]))
-        assert capture.records[0].success is False
+        assert capture.records[0].success is True
+        assert capture.records[0].score == 0.0
 
     def test_record_captures_token_usage(self) -> None:
         usage = {"prompt_tokens": 10, "completion_tokens": 5}
@@ -297,6 +299,78 @@ class TestAuditProviderSync:
         list(audit.infer(["prompt"]))
         assert len(c1.records) == 1
         assert len(c2.records) == 1
+
+    def test_latency_measures_inner_provider(self) -> None:
+        """Latency should capture inner provider time, not just list()."""
+        import time as _time
+
+        class _SlowProvider(BaseLanguageModel):
+            def infer(self, batch_prompts, **kw):
+                for _p in batch_prompts:
+                    _time.sleep(0.05)
+                    yield [ScoredOutput(score=1.0, output="ok")]
+
+            async def async_infer(self, batch_prompts, **kw):
+                return [[ScoredOutput(score=1.0, output="ok")]]
+
+        capture = _CaptureSink()
+        audit = AuditLanguageModel(
+            model_id="audit/test",
+            inner=_SlowProvider(),
+            sinks=[capture],
+        )
+        list(audit.infer(["p1"]))
+        # Should capture >= 50ms, not ~0ms
+        assert capture.records[0].latency_ms >= 40.0
+
+    def test_error_records_failure(self) -> None:
+        """Inner provider exception sets success=False and error."""
+
+        class _FailProvider(BaseLanguageModel):
+            def infer(self, batch_prompts, **kw):
+                raise RuntimeError("model exploded")
+
+            async def async_infer(self, batch_prompts, **kw):
+                raise RuntimeError("model exploded")
+
+        capture = _CaptureSink()
+        audit = AuditLanguageModel(
+            model_id="audit/test",
+            inner=_FailProvider(),
+            sinks=[capture],
+        )
+        with pytest.raises(RuntimeError, match="model exploded"):
+            list(audit.infer(["prompt"]))
+        assert len(capture.records) == 1
+        assert capture.records[0].success is False
+        assert capture.records[0].error == "model exploded"
+
+    def test_sample_length_stores_truncated_text(self) -> None:
+        stub = _StubProvider(
+            responses=[[ScoredOutput(score=1.0, output="response text here")]]
+        )
+        capture = _CaptureSink()
+        audit = AuditLanguageModel(
+            model_id="audit/test",
+            inner=stub,
+            sinks=[capture],
+            sample_length=5,
+        )
+        list(audit.infer(["hello world"]))
+        assert capture.records[0].prompt_sample == "hello..."
+        assert capture.records[0].response_sample == "respo..."
+
+    def test_no_sample_by_default(self) -> None:
+        stub = _StubProvider()
+        capture = _CaptureSink()
+        audit = AuditLanguageModel(
+            model_id="audit/test",
+            inner=stub,
+            sinks=[capture],
+        )
+        list(audit.infer(["hello"]))
+        assert capture.records[0].prompt_sample is None
+        assert capture.records[0].response_sample is None
 
     def test_default_sink_is_logging(self) -> None:
         stub = _StubProvider()

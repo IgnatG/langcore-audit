@@ -39,6 +39,10 @@ class AuditLanguageModel(BaseLanguageModel):
         inner: The ``BaseLanguageModel`` instance to wrap.
         sinks: Optional list of ``AuditSink`` instances.  Defaults
             to a single ``LoggingSink``.
+        sample_length: When set, store the first *N* characters of
+            prompt and response text in the audit record for
+            debugging and correlation.  ``None`` (default) disables
+            sample storage to avoid accidental PII logging.
         **kwargs: Additional keyword arguments forwarded to the
             base class.
     """
@@ -49,12 +53,14 @@ class AuditLanguageModel(BaseLanguageModel):
         *,
         inner: BaseLanguageModel,
         sinks: list[AuditSink] | None = None,
+        sample_length: int | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.model_id = model_id
         self._inner = inner
         self._sinks: list[AuditSink] = sinks or [LoggingSink()]
+        self._sample_length = sample_length
 
     # -- Public helpers --
 
@@ -93,6 +99,21 @@ class AuditLanguageModel(BaseLanguageModel):
                     type(sink).__name__,
                 )
 
+    @staticmethod
+    def _truncate(text: str, max_length: int) -> str:
+        """Truncate text to max_length, adding ellipsis if needed.
+
+        Parameters:
+            text: The text to truncate.
+            max_length: Maximum character length.
+
+        Returns:
+            The truncated string.
+        """
+        if len(text) <= max_length:
+            return text
+        return text[:max_length] + "..."
+
     def _build_record(
         self,
         prompt: str,
@@ -100,6 +121,9 @@ class AuditLanguageModel(BaseLanguageModel):
         latency_ms: float,
         batch_index: int,
         batch_size: int,
+        *,
+        success: bool = True,
+        error: str | None = None,
     ) -> AuditRecord:
         """Build an ``AuditRecord`` from inference inputs and outputs.
 
@@ -109,6 +133,8 @@ class AuditLanguageModel(BaseLanguageModel):
             latency_ms: Elapsed time in milliseconds.
             batch_index: Index of this prompt in the batch.
             batch_size: Total prompts in the batch.
+            success: Whether the inference completed without error.
+            error: Error message if the inference call failed.
 
         Returns:
             A populated ``AuditRecord``.
@@ -123,11 +149,17 @@ class AuditLanguageModel(BaseLanguageModel):
         )
         response_text = best.output or ""
         score = best.score
-        success = score is not None and score > 0.0
 
         token_usage: dict[str, int] | None = None
         if best.usage is not None:
             token_usage = dict(best.usage)
+
+        # Opt-in truncated samples for debugging/correlation
+        prompt_sample: str | None = None
+        response_sample: str | None = None
+        if self._sample_length is not None:
+            prompt_sample = self._truncate(prompt, self._sample_length)
+            response_sample = self._truncate(response_text, self._sample_length)
 
         return AuditRecord(
             model_id=self.model_id,
@@ -137,9 +169,12 @@ class AuditLanguageModel(BaseLanguageModel):
             timestamp=AuditRecord.utc_now_iso(),
             success=success,
             score=score,
+            error=error,
             token_usage=token_usage,
             batch_index=batch_index,
             batch_size=batch_size,
+            prompt_sample=prompt_sample,
+            response_sample=response_sample,
         )
 
     # -- BaseLanguageModel interface --
@@ -164,23 +199,53 @@ class AuditLanguageModel(BaseLanguageModel):
             inner provider produces.
         """
         batch_size = len(batch_prompts)
-        for idx, (prompt, outputs) in enumerate(
-            zip(batch_prompts, self._inner.infer(batch_prompts, **kwargs), strict=True)
-        ):
-            t0 = time.perf_counter()
-            outputs_list = list(outputs)
-            latency_ms = (time.perf_counter() - t0) * 1000
+        try:
+            inner_iter = iter(self._inner.infer(batch_prompts, **kwargs))
+        except Exception as exc:
+            # Inner provider failed on initialisation — log all
+            # prompts as failed and re-raise.
+            latency_ms = 0.0
+            for idx, prompt in enumerate(batch_prompts):
+                record = self._build_record(
+                    prompt=prompt,
+                    outputs=[],
+                    latency_ms=latency_ms,
+                    batch_index=idx,
+                    batch_size=batch_size,
+                    success=False,
+                    error=str(exc),
+                )
+                self._emit(record)
+            raise
 
-            # The latency above only captures list() materialisation;
-            # real latency is dominated by the inner infer generator.
-            # We measure the *total* batch start-to-yield gap instead.
-            record = self._build_record(
-                prompt=prompt,
-                outputs=outputs_list,
-                latency_ms=latency_ms,
-                batch_index=idx,
-                batch_size=batch_size,
-            )
+        for idx, prompt in enumerate(batch_prompts):
+            t0 = time.perf_counter()
+            try:
+                outputs_seq = next(inner_iter)
+                outputs_list = list(outputs_seq)
+                latency_ms = (time.perf_counter() - t0) * 1000
+                record = self._build_record(
+                    prompt=prompt,
+                    outputs=outputs_list,
+                    latency_ms=latency_ms,
+                    batch_index=idx,
+                    batch_size=batch_size,
+                    success=True,
+                )
+            except Exception as exc:
+                latency_ms = (time.perf_counter() - t0) * 1000
+                outputs_list = [ScoredOutput(score=0.0, output="")]
+                record = self._build_record(
+                    prompt=prompt,
+                    outputs=outputs_list,
+                    latency_ms=latency_ms,
+                    batch_index=idx,
+                    batch_size=batch_size,
+                    success=False,
+                    error=str(exc),
+                )
+                self._emit(record)
+                raise
             self._emit(record)
             yield outputs_list
 
@@ -206,20 +271,36 @@ class AuditLanguageModel(BaseLanguageModel):
         batch_size = len(batch_prompts)
 
         t0 = time.perf_counter()
-        results = await self._inner.async_infer(batch_prompts, **kwargs)
-        total_latency_ms = (time.perf_counter() - t0) * 1000
-        per_prompt_ms = total_latency_ms / batch_size if batch_size else 0.0
+        try:
+            results = await self._inner.async_infer(batch_prompts, **kwargs)
+            total_latency_ms = (time.perf_counter() - t0) * 1000
+            per_prompt_ms = total_latency_ms / batch_size if batch_size else 0.0
 
-        for idx, (prompt, outputs) in enumerate(
-            zip(batch_prompts, results, strict=True)
-        ):
-            record = self._build_record(
-                prompt=prompt,
-                outputs=list(outputs),
-                latency_ms=per_prompt_ms,
-                batch_index=idx,
-                batch_size=batch_size,
-            )
-            self._emit(record)
+            for idx, (prompt, outputs) in enumerate(
+                zip(batch_prompts, results, strict=True)
+            ):
+                record = self._build_record(
+                    prompt=prompt,
+                    outputs=list(outputs),
+                    latency_ms=per_prompt_ms,
+                    batch_index=idx,
+                    batch_size=batch_size,
+                    success=True,
+                )
+                self._emit(record)
 
-        return results
+            return results
+        except Exception as exc:
+            latency_ms = (time.perf_counter() - t0) * 1000
+            for idx, prompt in enumerate(batch_prompts):
+                record = self._build_record(
+                    prompt=prompt,
+                    outputs=[],
+                    latency_ms=latency_ms,
+                    batch_index=idx,
+                    batch_size=batch_size,
+                    success=False,
+                    error=str(exc),
+                )
+                self._emit(record)
+            raise

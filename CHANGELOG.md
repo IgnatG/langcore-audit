@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.1.6 (2026-02-23)
+
+### Bug Fixes
+
+- Update langcore dependency and remove langextract-core references
+  ([`2a0dfa6`](https://github.com/IgnatG/langcore-audit/commit/2a0dfa68f67634da34c96d8ef7839c73cdb23124))
+
+
 ## v1.1.5 (2026-02-23)
 
 ### Bug Fixes
